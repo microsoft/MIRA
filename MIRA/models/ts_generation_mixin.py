@@ -1,3 +1,11 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+'''
+Part of code from time_moe.models.ts_generation_mixin
+https://github.com/Time-MoE
+'''
+
 import warnings
 from typing import Any, Dict, List, Optional, Union
 

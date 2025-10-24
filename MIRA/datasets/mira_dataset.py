@@ -1,15 +1,21 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 _*-
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+'''
+Part of code from time_moe.datasets.time_moe_dataset
+https://github.com/Time-MoE
+'''
+
 import os
 import numpy as np
 
 from .ts_dataset import TimeSeriesDataset
 from .general_dataset import GeneralDataset
 from .binary_dataset import BinaryDataset
-from time_moe.datasets.timeawared_dataset import TimeAwareJSONLDataset
+from mira.datasets.timeawared_dataset import TimeAwareJSONLDataset
 
 
-class TimeMoEDataset(TimeSeriesDataset):
+class MIRADataset(TimeSeriesDataset):
 
     def __init__(self, data_folder, normalization_method=None):
         self.data_folder = data_folder

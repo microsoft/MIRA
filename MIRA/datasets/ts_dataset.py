@@ -1,6 +1,12 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 _*-
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 from abc import abstractmethod
+
+'''
+Code from time_moe.datasets.s_dataset
+https://github.com/Time-MoE
+'''
 
 
 class TimeSeriesDataset:

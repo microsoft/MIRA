@@ -1,5 +1,11 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 _*-
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+'''
+Code from time_moe.datasets.binary_dataset
+https://github.com/Time-MoE
+'''
+
 import json
 import os
 import numpy as np
@@ -13,7 +19,7 @@ class BinaryDataset(TimeSeriesDataset):
 
     def __init__(self, data_path):
         if not self.is_valid_path(data_path):
-            raise ValueError(f'Folder {data_path} is not a valid TimeMoE dataset.')
+            raise ValueError(f'Folder {data_path} is not a valid MIRA dataset.')
 
         self.data_path = data_path
 

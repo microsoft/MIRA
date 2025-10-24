@@ -1,13 +1,19 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 _*-
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+'''
+Code from time_moe.models.runner
+https://github.com/Time-MoE
+'''
+
 import numpy as np
 import os
 import pandas as pd
 from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
 
-from time_moe.datasets.general_dataset import GeneralDataset
-from time_moe.utils.log_util import log_in_local_rank_0
+from mira.datasets.general_dataset import GeneralDataset
+from mira_moe.utils.log_util import log_in_local_rank_0
 
 
 class BenchmarkEvalDataset(Dataset):

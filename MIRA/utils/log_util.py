@@ -1,12 +1,17 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 _*-
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+'''
+Code from time_moe.models.utils.log_util
+https://github.com/Time-MoE
+'''
 import os
 import logging
 import sys
 import typing
 
 # -------- log setting ---------
-DEFAULT_LOGGER = "time_moe_logger"
+DEFAULT_LOGGER = "mira_logger"
 
 DEFAULT_FORMATTER = logging.Formatter(
     '%(asctime)s - %(filename)s[pid:%(process)d;line:%(lineno)d:%(funcName)s] - %(levelname)s: %(message)s'

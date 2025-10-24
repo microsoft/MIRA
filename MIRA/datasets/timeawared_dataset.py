@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 _*-
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 import json
 import os 
 import numpy as np
@@ -9,8 +10,8 @@ from collections import Counter
 import pickle 
 import gzip
 import yaml 
-from time_moe.utils.log_util import logger
-from time_moe.datasets.ts_dataset import TimeSeriesDataset
+from mira.utils.log_util import logger
+from mira.datasets.ts_dataset import TimeSeriesDataset
 import traceback
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
@@ -434,5 +435,6 @@ class TimeAwareEvalDataset(Dataset):
 
             inputs['sequence'] = (inputs['sequence'] - mean) / std
             labels['sequence'] = (labels['sequence'] - mean) / std
+
 
         return inputs, labels

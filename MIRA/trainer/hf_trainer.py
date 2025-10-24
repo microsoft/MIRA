@@ -1,5 +1,11 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 _*-
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+'''
+Part of code from time_moe.models.trainer.hf_trainer
+https://github.com/Time-MoE
+'''
+
 import math
 from dataclasses import field, dataclass
 from functools import partial
@@ -12,7 +18,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from transformers import get_scheduler
 
 
-class TimeMoeTrainer(transformers.Trainer):
+class MIRATrainer(transformers.Trainer):
     epsilon = 1e-8
 
     def __init__(self, label_column: str = 'labels', loss_mask_column: str = 'loss_mask', *positional_args, **kwargs):
@@ -59,7 +65,7 @@ class TimeMoeTrainer(transformers.Trainer):
 
 
 @dataclass
-class TimeMoETrainingArguments(transformers.TrainingArguments):
+class MIRATrainingArguments(transformers.TrainingArguments):
     min_learning_rate: float = field(
         default=0, metadata={"help": "Minimum learning rate for cosine_schedule"}
     )

@@ -1,3 +1,11 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+'''
+Part of code from time_moe.models.modeling_time_moe
+https://github.com/Time-MoE
+'''
+
 import math
 from typing import Optional, Tuple, List, Union
 import warnings
@@ -11,7 +19,7 @@ from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_m
 from transformers.modeling_outputs import MoeModelOutputWithPast, MoeCausalLMOutputWithPast
 from transformers.utils import logging, is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
 
-from .configuration_time_moe import TimeMoeConfig
+from .configuration_mira import MIRAConfig
 from .ts_generation_mixin import TSGenerationMixin
 
 logger = logging.get_logger(__name__)
@@ -179,12 +187,12 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
-class TimeMoeInputEmbedding(nn.Module):
+class MIRAInputEmbedding(nn.Module):
     """
     Use a mlp layer to embedding the time-series.
     """
 
-    def __init__(self, config: TimeMoeConfig):
+    def __init__(self, config: MIRAConfig):
         super().__init__()
         self.config = config
         self.input_size = config.input_size  # default 1
@@ -198,7 +206,6 @@ class TimeMoeInputEmbedding(nn.Module):
         return emb
 
 
-# --- CT-RoPE Implementation (Based on paper, f(t) = t) ---
 class ContinuousTimeRotaryEmbedding(nn.Module):
     """Continuous-Time Rotary Positional Encoding (CT-RoPE) based on paper description."""
     def __init__(self, dim, base=10000.0, device=None):
@@ -270,8 +277,8 @@ class ContinuousTimeRotaryEmbedding(nn.Module):
         return q_embed, k_embed, cos, sin
 
 
-# Copied from transformers.models.mistral.modeling_mistral.MistralRotaryEmbedding with Mistral->TimeMOE
-class TimeMoeRotaryEmbedding(torch.nn.Module):
+# Copied from transformers.models.mistral.modeling_mistral.MistralRotaryEmbedding 
+class MIRARotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
         super().__init__()
 
@@ -307,8 +314,8 @@ class TimeMoeRotaryEmbedding(torch.nn.Module):
         )
 
 
-# Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->TimeMOE
-class TimeMoeRMSNorm(torch.nn.Module):
+# Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm 
+class MIRARMSNorm(torch.nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -322,7 +329,7 @@ class TimeMoeRMSNorm(torch.nn.Module):
         return self.weight * hidden_states.to(input_dtype)
 
 
-class TimeMoeTemporalBlock(nn.Module):
+class MIRATemporalBlock(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int, hidden_act: str):
         super().__init__()
         self.hidden_size = hidden_size
@@ -336,7 +343,7 @@ class TimeMoeTemporalBlock(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
 
-class TimeMoeMLP(TimeMoeTemporalBlock):
+class MIRAMLP(MIRATemporalBlock):
     def __init__(self, hidden_size: int, intermediate_size: int, hidden_act: str):
         super().__init__(hidden_size, intermediate_size, hidden_act)
 
@@ -344,7 +351,8 @@ class TimeMoeMLP(TimeMoeTemporalBlock):
         return super().forward(hidden_state), None
 
 
-class TimeMoeSparseExpertsLayer(nn.Module):
+# Copied from time_moe.models.modeling_time_moe
+class MIRASparseExpertsLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -358,14 +366,14 @@ class TimeMoeSparseExpertsLayer(nn.Module):
         # gating
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
         self.experts = nn.ModuleList(
-            [TimeMoeTemporalBlock(
+            [MIRATemporalBlock(
                 hidden_size=self.config.hidden_size,
                 intermediate_size=moe_intermediate_size,
                 hidden_act=self.config.hidden_act,
             ) for _ in range(self.num_experts)]
         )
 
-        self.shared_expert = TimeMoeTemporalBlock(
+        self.shared_expert = MIRATemporalBlock(
             hidden_size=self.config.hidden_size,
             intermediate_size=self.config.intermediate_size,
             hidden_act=self.config.hidden_act,
@@ -418,14 +426,13 @@ class TimeMoeSparseExpertsLayer(nn.Module):
         return final_hidden_states, router_logits
 
 
-# Copied from transformers.models.qwen2.modeling_qwen2.Qwen2Attention with Qwen2->TimeMoe
-class TimeMoeAttention(nn.Module):
+class MIRAAttention(nn.Module):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
     and "Generating Long Sequences with Sparse Transformers".
     """
 
-    def __init__(self, config: TimeMoeConfig, layer_idx: Optional[int] = None):
+    def __init__(self, config: MIRAConfig, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -506,7 +513,7 @@ class TimeMoeAttention(nn.Module):
                 time_values_for_rope = time_values
             query_states, key_states, cos, sin = self.rotary_emb(query_states, key_states, time_values_for_rope)
 
-        elif isinstance(self.rotary_emb, TimeMoeRotaryEmbedding): # Standard RoPE
+        elif isinstance(self.rotary_emb, MIRARotaryEmbedding): # Standard RoPE
             if position_ids is None:
                 raise ValueError("`position_ids` must be provided for standard RoPE.")
             # Rotary embedding needs the full sequence length for cos/sin cache lookup
@@ -575,7 +582,7 @@ class TimeMoeAttention(nn.Module):
         return attn_output, attn_weights, past_key_value
 
 
-class TimeMoeFlashAttention2(TimeMoeAttention):
+class MIRAFlashAttention2(MIRAAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -765,13 +772,13 @@ class TimeMoeFlashAttention2(TimeMoeAttention):
 
 
 TIME_MOE_ATTENTION_CLASSES = {
-    "eager": TimeMoeAttention,
-    'flash_attention_2': TimeMoeFlashAttention2,
+    "eager": MIRAAttention,
+    'flash_attention_2': MIRAFlashAttention2,
 }
 
 
-class TimeMoeDecoderLayer(nn.Module):
-    def __init__(self, config: TimeMoeConfig, layer_idx: int):
+class MIRADecoderLayer(nn.Module):
+    def __init__(self, config: MIRAConfig, layer_idx: int):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -780,15 +787,15 @@ class TimeMoeDecoderLayer(nn.Module):
         self.self_attn = TIME_MOE_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
 
         if self.config.use_dense:
-            self.ffn_layer = TimeMoeMLP(
+            self.ffn_layer = MIRAMLP(
                 hidden_size=self.config.hidden_size,
                 intermediate_size=self.config.intermediate_size,
                 hidden_act=self.config.hidden_act,
             )
         else:
-            self.ffn_layer = TimeMoeSparseExpertsLayer(config)
-        self.input_layernorm = TimeMoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = TimeMoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.ffn_layer = MIRASparseExpertsLayer(config)
+        self.input_layernorm = MIRARMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = MIRARMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
             self,
@@ -849,11 +856,11 @@ class TimeMoeDecoderLayer(nn.Module):
         return hidden_states, self_attn_weights, present_key_value, router_logits
 
 
-class TimeMoePreTrainedModel(PreTrainedModel):
-    config_class = TimeMoeConfig
+class MIRAPreTrainedModel(PreTrainedModel):
+    config_class = MIRAConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["TimeMoeDecoderLayer"]
+    _no_split_modules = ["MIRADecoderLayer"]
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
     _supports_sdpa = False
@@ -871,19 +878,19 @@ class TimeMoePreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-class TimeMoeModel(TimeMoePreTrainedModel):
+class MIRAModel(MIRAPreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`TimeMoeDecoderLayer`]
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`MIRADecoderLayer`]
 
     Args:
-        config: TimeMoeConfig
+        config: MIRAConfig
     """
 
-    def __init__(self, config: TimeMoeConfig):
+    def __init__(self, config: MIRAConfig):
         super().__init__(config)
-        self.embed_layer = TimeMoeInputEmbedding(config)
+        self.embed_layer = MIRAInputEmbedding(config)
         self.layers = nn.ModuleList(
-            [TimeMoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [MIRADecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         # Force eager implementation if CT-RoPE is used, as Flash Attention adaptation is complex.
         self._attn_implementation = config._attn_implementation
@@ -891,7 +898,7 @@ class TimeMoeModel(TimeMoePreTrainedModel):
             logger.warning("CT-RoPE requires specific adaptations for Flash Attention. Falling back to 'eager'.")
             self._attn_implementation = "eager" # Force eager for CT-RoPE
 
-        self.norm = TimeMoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = MIRARMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -1037,10 +1044,10 @@ class TimeMoeModel(TimeMoePreTrainedModel):
             attentions=all_self_attns,
             router_logits=all_router_logits
         )
+    
 
-# --- ODE Components---
 class ODEFunc(nn.Module):
-    def __init__(self, config: TimeMoeConfig):
+    def __init__(self, config: MIRAConfig):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -1077,7 +1084,7 @@ class ODEFunc(nn.Module):
 
 
 class TerminalODEBlock(nn.Module):
-    def __init__(self, config: TimeMoeConfig):
+    def __init__(self, config: MIRAConfig):
         super().__init__()
         self.config = config
         if not is_torchdiffeq_available:
@@ -1152,7 +1159,7 @@ class TerminalODEBlock(nn.Module):
         return h_extrapolated
 
 
-class TimeMoeOutputLayer(nn.Module):
+class MIRAOutputLayer(nn.Module):
 
     def __init__(self, hidden_size: int, horizon_length: int, input_size: int = 1):
         super().__init__()
@@ -1175,9 +1182,9 @@ class TimeMoeOutputLayer(nn.Module):
         return self.out_layer(x)
 
 
-class TimeMoeForPrediction(TimeMoePreTrainedModel, TSGenerationMixin):
+class MIRAForPrediction(MIRAPreTrainedModel, TSGenerationMixin):
 
-    def __init__(self, config: TimeMoeConfig):
+    def __init__(self, config: MIRAConfig):
         config.horizon_lengths=[1]
         super().__init__(config)
         self.config = config
@@ -1187,9 +1194,8 @@ class TimeMoeForPrediction(TimeMoePreTrainedModel, TSGenerationMixin):
         '''
         hard code for 1 lm_head
         '''
-        self.model = TimeMoeModel(config)
+        self.model = MIRAModel(config)
 
-        # --- Initialize ODE Block (if enabled) ---
         self.use_terminal_ode = getattr(config, "use_terminal_ode", True)
         if self.use_terminal_ode:
              if not is_torchdiffeq_available:
@@ -1206,7 +1212,7 @@ class TimeMoeForPrediction(TimeMoePreTrainedModel, TSGenerationMixin):
         self.horizon_length_map = {}
         for i, horizon_length in enumerate(config.horizon_lengths):
             lm_head_list.append(
-                TimeMoeOutputLayer(
+                MIRAOutputLayer(
                     hidden_size=self.config.hidden_size,
                     input_size=self.config.input_size,
                     horizon_length=horizon_length,
@@ -1473,12 +1479,9 @@ class TimeMoeForPrediction(TimeMoePreTrainedModel, TSGenerationMixin):
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
             model_inputs = {"input_ids": input_ids}
+
         
-        # --- Time Values Handling (Crucial for CT-RoPE) ---
-        # We need the full sequence of absolute time values up to the current step.
-        # The calling function (`generate`) needs to manage this history.
-        # `time_values` passed here should represent the times for the *new tokens only*.
-        # `cached_time_values` should contain the history.
+        # Time Values Handling
         cached_time_values = kwargs.get("cached_time_values", None)
         if self.config.time_aware_rotary:
              if past_key_values is None: # First step (prompt)
@@ -1499,7 +1502,7 @@ class TimeMoeForPrediction(TimeMoePreTrainedModel, TSGenerationMixin):
              model_inputs["time_values"] = None # Don't pass if not needed by backbone
 
         
-        # --- Pass next_target_time_values needed for ODE ---
+        # Pass next_target_time_values needed for ODE 
         model_inputs["next_target_time_values"] = next_target_time_values
 
         model_inputs.update(

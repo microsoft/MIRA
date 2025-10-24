@@ -1,3 +1,11 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+'''
+Code from time_moe.models.runner
+https://github.com/Time-MoE
+'''
+
 import os
 import math
 import random
@@ -10,22 +18,23 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from sklearn.preprocessing import StandardScaler 
 
-from time_moe.datasets.time_moe_dataset import TimeMoEDataset
-from time_moe.datasets.time_moe_window_dataset import TimeMoEWindowDataset, TimeAwareWindowDataset
-from time_moe.models.modeling_time_moe import TimeMoeForPrediction, TimeMoeConfig
-from time_moe.trainer.hf_trainer import TimeMoETrainingArguments, TimeMoeTrainer
-from time_moe.utils.dist_util import get_world_size
-from time_moe.utils.log_util import logger, log_in_local_rank_0
+from mira.datasets.mira_dataset import MIRADataset
+from mira.datasets.mira_window_dataset import MIRAWindowDataset, TimeAwareWindowDataset
+from mira.models.modeling_mira import MIRAForPrediction, MIRAConfig
+from mira.trainer.hf_trainer import MIRATrainingArguments, MIRATrainer
+from mira.utils.dist_util import get_world_size
+from mira.utils.log_util import logger, log_in_local_rank_0
 
-from time_moe.datasets.timeawared_dataset import TimeAwareJSONLDataset
+from mira.datasets.timeawared_dataset import TimeAwareJSONLDataset
 
-from time_moe.datasets.time_utils import time_aware_collate_fn
+from mira.datasets.time_utils import time_aware_collate_fn
 
-class TimeMoeRunner:
+
+class MIRARunner:
     def __init__(
             self,
             model_path: str = None,
-            output_path: str = 'logs/time_moe',
+            output_path: str = 'logs/mira',
             seed: int = 9899
     ):
         self.model_path = model_path
@@ -41,6 +50,7 @@ class TimeMoeRunner:
             attn = 'eager'
         elif attn == 'auto':
             # try to use flash-attention
+            # Please aware mira cannot using falsh attention directly when using CT-RoPE
             try:
                 from flash_attn import flash_attn_func, flash_attn_varlen_func
                 from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
@@ -58,10 +68,10 @@ class TimeMoeRunner:
         kwargs['attn_implementation'] = attn
 
         if from_scatch:
-            config = TimeMoeConfig.from_pretrained(model_path, _attn_implementation=attn)
-            model = TimeMoeForPrediction(config)
+            config = MIRAConfig.from_pretrained(model_path, _attn_implementation=attn)
+            model = MIRAForPrediction(config)
         else:
-            model = TimeMoeForPrediction.from_pretrained(model_path, **kwargs)
+            model = MIRAForPrediction.from_pretrained(model_path, **kwargs)
         return model
 
     def train_model(self, from_scratch: bool = False, resume_from_checkpoint: str = None, **kwargs):
@@ -115,6 +125,10 @@ class TimeMoeRunner:
             torch_dtype = torch.float32
         else:
             raise ValueError(f'Unsupported precision {precision}')
+        
+        '''
+        #### Our original code ####
+        '''
 
         # --- Load Dataset ---
         is_time_aware_dataset = train_config.get('time_aware_dataset', True) # Default to True if using jsonl
@@ -151,19 +165,24 @@ class TimeMoeRunner:
         else:
              # Fallback to original non-time-aware data loading if needed
              log_in_local_rank_0('Loading non-time-aware dataset...')
-             dataset = TimeMoEDataset(
+             dataset = MIRADataset(
                  data_path,
                  normalization_method=train_config["normalization_method"] # Value normalization
              )
              log_in_local_rank_0('Processing dataset to fixed-size sub-sequences...')
 
-             window_dataset = TimeMoEWindowDataset(
+             window_dataset = MIRAWindowDataset(
                  dataset,
                  context_length=max_length,
                  prediction_length=0,
                  shuffle=False
              )
              train_ds = window_dataset
+        
+        '''
+        Code from time_moe.models.runner
+        https://github.com/Time-MoE/Time-MoE
+        '''
 
         log_in_local_rank_0(f'Set global_batch_size to {global_batch_size}')
         log_in_local_rank_0(f'Set micro_batch_size to {micro_batch_size}')
@@ -171,7 +190,7 @@ class TimeMoeRunner:
         log_in_local_rank_0(f'Set precision to {precision}')
         log_in_local_rank_0(f'Set normalization to {train_config["normalization_method"]}')
 
-        training_args = TimeMoETrainingArguments(
+        training_args = MIRATrainingArguments(
             output_dir=self.output_path,
             num_train_epochs=num_train_epochs,
             # use_cpu=True,
@@ -243,7 +262,7 @@ class TimeMoeRunner:
    
         if train_ds is None:
              raise RuntimeError("train_ds was not properly initialized. Check dataset loading logic.")
-        trainer = TimeMoeTrainer(
+        trainer = MIRATrainer(
             model=model,
             args=training_args,
             train_dataset=train_ds,

@@ -1,12 +1,14 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 _*-
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 import random
 import numpy as np
 from tqdm import tqdm
-from time_moe.datasets.ts_dataset import TimeSeriesDataset
+from mira.datasets.ts_dataset import TimeSeriesDataset
 from torch.utils.data import Dataset
 from transformers.utils import logging
 from numpy.lib.stride_tricks import sliding_window_view
+
 
 logger = logging.get_logger(__name__)
 
@@ -150,8 +152,8 @@ class TimeAwareWindowDataset(Dataset):
             'next_target_time_values': next_target_time_value 
         }
 
-
-class TimeMoEWindowDataset:
+# Code copied from time_moe.datasets.time_moe_window_dataset
+class MIRAWindowDataset:
     """
     A dataset that generates windows of time series data.
     """
@@ -201,8 +203,8 @@ class TimeMoEWindowDataset:
             'loss_masks': loss_mask
         }
 
-
-class UniversalTimeMoEWindowDataset:
+# Code copied from time_moe.datasets.time_moe_window_dataset
+class UniversalMIRAWindowDataset:
     """
     A dataset that generates windows of time series data with pack technique.
     """

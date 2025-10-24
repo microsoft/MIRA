@@ -1,3 +1,11 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+'''
+Part of code from time_moe.models.configuration_time_moe
+https://github.com/Time-MoE
+'''
+
 from typing import List, Optional
 from transformers import PretrainedConfig
 from transformers.utils import logging
@@ -5,8 +13,8 @@ from transformers.utils import logging
 logger = logging.get_logger(__name__)
 
 
-class TimeMoeConfig(PretrainedConfig):
-    model_type = "time_moe"
+class MIRAConfig(PretrainedConfig):
+    model_type = "mira"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -27,11 +35,13 @@ class TimeMoeConfig(PretrainedConfig):
             use_cache: bool = True,
             use_dense: bool = False,
 
-            # --- Time/Positional Encoding ---
+            # Time/Positional Encoding
             time_aware_rotary: bool = True,
             rope_theta: int = 10000,
 
-            # --- Terminal ODE Module ---
+
+
+            # Terminal ODE Module
             use_terminal_ode: bool = True, #
             ode_func_hidden_dims: List[int] = [128, 128],
             ode_func_activation: str = "silu", 
@@ -40,11 +50,11 @@ class TimeMoeConfig(PretrainedConfig):
             ode_solver_rtol: float = 1e-6,
             ode_func_use_time: bool = True, # Whether f_ODE uses relative time (s-t_N) as input
 
-            # --- MoE Config ---
+            # MoE Config
             apply_aux_loss: bool = True, # Automatically disabled if use_dense=True
             router_aux_loss_factor: float = 0.02,
 
-            # --- Other ---
+            # Other
             attention_dropout: float = 0.0,
             tie_word_embeddings: bool = False,
             gradient_checkpointing_kwargs: Optional[dict] = None, # Corrected type hint
@@ -72,12 +82,13 @@ class TimeMoeConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.use_dense = use_dense
 
-        # --- Time/Positional Encoding ---
+
+        # Time/Positional Encoding 
         self.time_aware_rotary = time_aware_rotary
         # self.rope_theta = float(rope_theta) # Ensure float, matches 'base' in CT-RoPE
         self.rope_theta = rope_theta
 
-        # --- Terminal ODE ---
+        # Terminal ODE 
         self.use_terminal_ode = use_terminal_ode
         self.ode_func_hidden_dims = ode_func_hidden_dims
         self.ode_func_activation = ode_func_activation
@@ -86,12 +97,12 @@ class TimeMoeConfig(PretrainedConfig):
         self.ode_solver_rtol = ode_solver_rtol
         self.ode_func_use_time = ode_func_use_time
 
-        # --- MoE ---
+        # MoE 
         # Ensure apply_aux_loss matches MoE usage
         self.apply_aux_loss = apply_aux_loss
         self.router_aux_loss_factor = router_aux_loss_factor
  
-        # --- Other ---
+        # Other
         self.attention_dropout = attention_dropout
         self.gradient_checkpointing_kwargs = gradient_checkpointing_kwargs if gradient_checkpointing_kwargs is not None else {"use_reentrant": True}
 
