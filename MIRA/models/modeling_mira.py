@@ -20,7 +20,9 @@ from transformers.modeling_outputs import MoeModelOutputWithPast, MoeCausalLMOut
 from transformers.utils import logging, is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
 
 from .configuration_mira import MIRAConfig
-from .ts_generation_mixin import TSGenerationMixin
+from .ts_generation_mixin import MIRAGenerationMixin
+from .utils_time_normalization import normalize_time_for_ctrope
+from typing import Dict, Any, Optional, List, Union
 
 logger = logging.get_logger(__name__)
 
@@ -904,6 +906,12 @@ class MIRAModel(MIRAPreTrainedModel):
         # Initialize weights and apply final processing
             
         self.post_init()
+    
+    def get_input_embeddings(self):
+        return self.embed_layer.emb_layer
+
+    def set_input_embeddings(self, value):
+        self.embed_layer.emb_layer = value
 
     def forward(
             self,
@@ -953,7 +961,6 @@ class MIRAModel(MIRAPreTrainedModel):
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             past_key_values_length = past_key_values.get_usable_length(seq_length)
 
-        # --- Position IDs (for standard RoPE fallback) ---
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
             position_ids = torch.arange(
@@ -963,8 +970,16 @@ class MIRAModel(MIRAPreTrainedModel):
             position_ids = position_ids.view(-1, seq_length)
         else:
             position_ids = position_ids.view(-1, seq_length).long()
+        
+        if time_values is not None and getattr(self.config, "time_aware_rotary", False):
+            alpha = getattr(self.config, "time_scale", 1.0)
+            time_values, t_min, t_max = normalize_time_for_ctrope(
+                time_values=time_values,
+                attention_mask=attention_mask,
+                seq_length=seq_length,
+                alpha=alpha,
+            )
 
-        # --- Input Embeddings ---
         if inputs_embeds is None:
             inputs_embeds = self.embed_layer(input_ids)
 
@@ -986,6 +1001,7 @@ class MIRAModel(MIRAPreTrainedModel):
         all_self_attns = () if output_attentions else None
         all_router_logits = ()
         next_decoder_cache = None
+
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -994,6 +1010,7 @@ class MIRAModel(MIRAPreTrainedModel):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
+                    time_values,
                     attention_mask,
                     position_ids,
                     past_key_values,
@@ -1003,16 +1020,15 @@ class MIRAModel(MIRAPreTrainedModel):
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
+                    time_values=time_values,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
-                    time_values=time_values,
                 )
 
             hidden_states = layer_outputs[0]
-
             all_router_logits += (layer_outputs[-1],)
 
             if output_attentions:
@@ -1107,7 +1123,8 @@ class TerminalODEBlock(nn.Module):
         delta_t = t_Nplus1 - t_N
 
         # Handle cases where delta_t might be zero or negative per batch item
-        if torch.any(delta_t <= 0):
+        # We consider delat_t smaller than 1 as regular time interval as pos_ids: 0,1,2...
+        if torch.any(delta_t <= 1):
              warnings.warn("ODE integration interval delta_t <= 0 detected for some batch items. Returning initial state h_N for those items.")
              # Identify indices where delta_t > 0
              valid_indices = delta_t > 0
@@ -1127,8 +1144,8 @@ class TerminalODEBlock(nn.Module):
              )
              h_extrapolated_valid = solution_valid[-1] # State at max_delta_t [N_valid, D]
 
-             if torch.any(delta_t <= 0):
-                 warnings.warn("delta_t <= 0 detected, returning input state for those items.")
+             if torch.any(delta_t <= 1):
+                 warnings.warn("delta_t negative detected, returning input state for those items.")
                  # For now, just solve for the whole batch using first item's delta_t for t_eval shape
                  # This requires user to ensure valid delta_t or handle results carefully.
                  t_eval = torch.tensor([0.0, delta_t[0].item()], device=h_N.device)
@@ -1182,7 +1199,7 @@ class MIRAOutputLayer(nn.Module):
         return self.out_layer(x)
 
 
-class MIRAForPrediction(MIRAPreTrainedModel, TSGenerationMixin):
+class MIRAForPrediction(MIRAPreTrainedModel, MIRAGenerationMixin):
 
     def __init__(self, config: MIRAConfig):
         config.horizon_lengths=[1]
@@ -1191,6 +1208,7 @@ class MIRAForPrediction(MIRAPreTrainedModel, TSGenerationMixin):
         self.apply_aux_loss = config.apply_aux_loss
         self.num_experts_per_tok = config.num_experts_per_tok
         self.router_aux_loss_factor = config.router_aux_loss_factor
+
         '''
         hard code for 1 lm_head
         '''
@@ -1237,6 +1255,7 @@ class MIRAForPrediction(MIRAPreTrainedModel, TSGenerationMixin):
 
     def set_output_embeddings(self, new_layer): 
         self.lm_heads[0].out_layer = new_layer # Only first head
+
     def _tie_weights(self): 
         pass
 
@@ -1284,40 +1303,46 @@ class MIRAForPrediction(MIRAPreTrainedModel, TSGenerationMixin):
             return_dict=return_dict,
         )
 
-        # --- Get final hidden state of the last token ---
         hidden_states_all = outputs.last_hidden_state if return_dict else outputs[0]
         hidden_states_last = hidden_states_all[:, -1, :] # Shape [B, D]
 
-        # Also get the absolute time of this last token
         time_values_last = None
         if time_values is not None:
             time_values_last = time_values[:, -1] # Shape [B]
+        
+        hidden_states_for_head = hidden_states_last  # default (no ODE)
 
-         # --- Apply Terminal ODE Extrapolation (if enabled) ---
-        hidden_states_for_head = hidden_states_last # Default to last state
+        # Safe ODE block
+        if (
+            self.use_terminal_ode
+            and self.ode_extrapolation_block is not None
+            and next_target_time_values is not None   #  future time
+            and time_values_last is not None          #  t_N
+        ):
+            # Ensure times have correct shape
+            if time_values_last.dim() == 0:
+                time_values_last = time_values_last.expand(hidden_states_last.shape[0])
+            if next_target_time_values.dim() == 0:
+                next_target_time_values = next_target_time_values.expand(hidden_states_last.shape[0])
 
-        if self.use_terminal_ode and self.ode_extrapolation_block is not None:
-            if next_target_time_values is None:
+            if time_values_last.dim() == 2:
+                time_values_last = time_values_last.squeeze(-1)
+            if next_target_time_values.dim() == 2:
+                next_target_time_values = next_target_time_values.squeeze(-1)
 
-                 if self.training:
-                      warnings.warn("use_terminal_ode=True but next_target_time_values not provided during training. Skipping ODE block.")
-                 else: # Inference requires it
-                      raise ValueError("`next_target_time_values` must be provided for inference when use_terminal_ode=True.")
-            elif time_values_last is None:
-                 raise ValueError("`time_values` must be provided for the last token when use_terminal_ode=True.")
-            else:
-                 # Ensure times are correctly shaped (scalar or [B])
-                 if time_values_last.dim() == 0: time_values_last = time_values_last.expand(hidden_states_last.shape[0])
-                 if next_target_time_values.dim() == 0: next_target_time_values = next_target_time_values.expand(hidden_states_last.shape[0])
+            # Run ODE extrapolation
+            hidden_states_for_head = self.ode_extrapolation_block(
+                h_N=hidden_states_last,
+                t_N=time_values_last,
+                t_Nplus1=next_target_time_values  
+            )
+        else:
+            # If training and missing next_target_time_values: warn once
+            if self.training and next_target_time_values is None:
+                warnings.warn("use_terminal_ode=True but next_target_time_values not provided during training. ODE skipped.")
+            # If inference and missing next_target_time_values: silently skip (no error)
+            pass
 
-                 # Extrapolate the state
-                 hidden_states_for_head = self.ode_extrapolation_block(
-                     h_N=hidden_states_last,
-                     t_N=time_values_last,
-                     t_Nplus1=next_target_time_values
-                ) # Shape [B, D]
-
-        # --- Prediction Heads ---
         # Unsqueeze the sequence dimension (now length 1) before passing to heads
         hidden_states = hidden_states_for_head.unsqueeze(1) # Shape [B, 1, D]
 
@@ -1336,7 +1361,6 @@ class MIRAForPrediction(MIRAPreTrainedModel, TSGenerationMixin):
                     predictions = one_predictions
             loss = ar_loss / len(self.config.horizon_lengths)
 
-            # --- Auxiliary MoE Load Balancing Loss (Computed over the full sequence if possible) ---
             if self.apply_aux_loss:
                 router_logits = outputs.router_logits if return_dict else outputs[-1]
 
@@ -1421,17 +1445,17 @@ class MIRAForPrediction(MIRAPreTrainedModel, TSGenerationMixin):
         return loss
 
     def prepare_inputs_for_generation(
-            self, 
-            input_ids, 
-            time_values: Optional[torch.FloatTensor] = None,
-            next_target_time_values: Optional[torch.FloatTensor] = None,
-            past_key_values=None, 
-            attention_mask=None, 
-            inputs_embeds=None, 
-            **kwargs
-    ):  
-        cache_position = kwargs.get("cache_position", None)
-        # Omit tokens covered by past_key_values
+        self,
+        input_ids: torch.FloatTensor,
+        time_values: Optional[torch.FloatTensor] = None,
+        next_target_time_values: Optional[torch.FloatTensor] = None,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        **kwargs,
+    ):
+
+        # Handle KV-cache slicing and alignment with time_values
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
                 cache_length = past_key_values.get_seq_length()
@@ -1439,70 +1463,77 @@ class MIRAForPrediction(MIRAPreTrainedModel, TSGenerationMixin):
                     past_length = past_key_values.seen_tokens
                 else:
                     past_length = cache_length
-
                 max_cache_length = past_key_values.get_max_length()
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
                 max_cache_length = None
 
-            # Keep only the unprocessed tokens:
-            # 1 - If the length of the attention_mask exceeds the length of input_ids, then we are in a setting where
-            # some of the inputs are exclusively passed as part of the cache (e.g. when passing input_embeds as
-            # input)
             if attention_mask is not None and attention_mask.shape[1] > input_ids.shape[1]:
-                input_ids = input_ids[:, -(attention_mask.shape[1] - past_length):]
-            # 2 - If the past_length is smaller than input_ids', then input_ids holds all input tokens. We can discard
-            # input_ids based on the past_length.
+                keep_len = attention_mask.shape[1] - past_length
+                input_ids = input_ids[:, -keep_len:]
+                # Slice time_values consistently with input_ids
+                if time_values is not None and time_values.shape[1] > keep_len:
+                    time_values = time_values[:, -keep_len:]
+
             elif past_length < input_ids.shape[1]:
                 input_ids = input_ids[:, past_length:]
-            # 3 - Otherwise (past_length >= input_ids.shape[1]), let's assume input_ids only has unprocessed tokens.
-
-            # If we are about to go beyond the maximum cache length, we need to crop the input attention mask.
+                if time_values is not None and time_values.shape[1] > past_length:
+                    time_values = time_values[:, past_length:]
             if (
-                    max_cache_length is not None
-                    and attention_mask is not None
-                    and cache_length + input_ids.shape[1] > max_cache_length
+                max_cache_length is not None
+                and attention_mask is not None
+                and cache_length + input_ids.shape[1] > max_cache_length
             ):
                 attention_mask = attention_mask[:, -max_cache_length:]
 
+        # Compute position_ids (for standard RoPE)
         position_ids = kwargs.get("position_ids", None)
         if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
-            if past_key_values:
+            if past_key_values is not None:
                 position_ids = position_ids[:, -input_ids.shape[1]:]
 
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:
-            logger.info('Use input_embedding')
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
             model_inputs = {"input_ids": input_ids}
 
-        
-        # Time Values Handling
-        cached_time_values = kwargs.get("cached_time_values", None)
-        if self.config.time_aware_rotary:
-             if past_key_values is None: # First step (prompt)
-                  if time_values is None: raise ValueError("`time_values` required for CT-RoPE on first step.")
-                  full_time_values = time_values
-             else: # Subsequent steps
-                  if cached_time_values is None: raise ValueError("`cached_time_values` required for CT-RoPE after first step.")
-                  if time_values is None: raise ValueError("`time_values` for new token(s) required for CT-RoPE.")
-                  # Concatenate history with new time(s)
-                  full_time_values = torch.cat([cached_time_values, time_values], dim=1)
+        if getattr(self.config, "time_aware_rotary", False):
+            if time_values is None:
+                raise ValueError(
+                    "`time_values` is required for CT-RoPE during generation."
+                )
 
-             # Pass the full time sequence needed by the backbone layers for CT-RoPE
-             model_inputs["time_values"] = full_time_values
-             # Store the full sequence back into kwargs for the *next* generation step's cache
-             kwargs["cached_time_values"] = full_time_values # This updates the cache for the caller
+            # Ensure time_values and input_ids lengths match
+            if time_values.shape[1] != input_ids.shape[1]:
+                if time_values.shape[1] > input_ids.shape[1]:
+                    time_values = time_values[:, -input_ids.shape[1]:]
+                else:
+                    raise ValueError(
+                        f"time_values length ({time_values.shape[1]}) is shorter than "
+                        f"input_ids length ({input_ids.shape[1]})."
+                    )
 
-        else: # Not using CT-RoPE
-             model_inputs["time_values"] = None # Don't pass if not needed by backbone
+        model_inputs["time_values"] = time_values
 
-        
-        # Pass next_target_time_values needed for ODE 
+
+        if next_target_time_values is not None:
+            if next_target_time_values.dim() == 1:
+                next_target_time_values = next_target_time_values.unsqueeze(1)  # [B] -> [B, 1]
+            elif next_target_time_values.dim() == 2 and next_target_time_values.shape[1] != 1:
+                next_target_time_values = next_target_time_values[:, -1:]
+        else:
+            if time_values is not None and self.use_terminal_ode:
+                time_step = kwargs.get("time_step", None)
+                if time_step is None and time_values.shape[1] > 1:
+                    time_diffs = time_values[:, 1:] - time_values[:, :-1]
+                    time_step = time_diffs.mean(dim=1, keepdim=True)
+                elif time_step is None:
+                    time_step = torch.ones(time_values.shape[0], 1, device=time_values.device)
+
+                next_target_time_values = time_values[:, -1:] + time_step
+
         model_inputs["next_target_time_values"] = next_target_time_values
 
         model_inputs.update(
@@ -1513,9 +1544,6 @@ class MIRAForPrediction(MIRAPreTrainedModel, TSGenerationMixin):
                 "attention_mask": attention_mask,
             }
         )
-
-        # Pass **kwargs unmodified as HF generate uses it internally
-        model_inputs.update(kwargs)
 
         return model_inputs
 

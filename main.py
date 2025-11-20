@@ -79,11 +79,13 @@ if __name__ == '__main__':
 
     # --- New Arguments for Time-Aware Dataset ---
     parser.add_argument('--time_aware_dataset', action='store_true', help='Use TimeAwareJSONLDataset and TimeAwareWindowDataset if data is .jsonl.')
-    parser.add_argument('--time_normalization_method', type=str, choices=['none', 'standard', 'minmax'], default='minmax', help='Normalization method for timestamps (if using time_aware_dataset).')
+    parser.add_argument('--time_normalization_method', type=str, choices=['none', 'standard', 'minmax'], default='none', help='Normalization method for timestamps (if using time_aware_dataset).')
     parser.add_argument('--time_quantize_resolution', type=float, default=None, help='Time quantization resolution (if using time_aware_dataset).')
     parser.add_argument('--time_auto_quantize', action='store_true', help='Automatically infer time quantization resolution (if using time_aware_dataset).')
     parser.add_argument('--data_sample_size', type=int, default=1000, help='Number of samples for inferring time normalization/quantization stats.')
     parser.add_argument('--min_valid_history', type=int, default=1, help='Minimum valid points required in a history window for TimeAwareWindowDataset.')
+    parser.add_argument('--time_aware_rotary', action='store_true', help='Enable CT-RoPE positional encoding (default: disabled unless model supports it).')
+    parser.add_argument('--time_scale', type=float, default=1.0, help='Scaling factor α for CT-RoPE time normalization (controls how time is mapped to RoPE index).')
 
 
     args = parser.parse_args()
@@ -98,7 +100,7 @@ if __name__ == '__main__':
     if last_checkpoint is not None:
         print(f"Resuming training from checkpoint: {last_checkpoint}")
     else:
-        print("No checkpoint found. Starting training from scratch.")
+        print("No interrupt checkpoint found. Starting training from scratch.")
 
     runner = MIRARunner(
         model_path=args.model_path,
@@ -147,5 +149,7 @@ if __name__ == '__main__':
         time_auto_quantize=args.time_auto_quantize,
         data_sample_size=args.data_sample_size,
         min_valid_history=args.min_valid_history,
+        time_aware_rotary=args.time_aware_rotary,
+        time_scale=args.time_scale,
         resume_from_checkpoint=last_checkpoint
     )

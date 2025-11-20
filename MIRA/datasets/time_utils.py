@@ -1,69 +1,86 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT license.
-
 import torch
 import numpy as np
 
-def time_aware_collate_fn(batch, pad_value=0, pad_time_value=0.0):
+def time_aware_collate_fn(batch, pad_value=0.0):
     """
-    Collates data from TimeAwareWindowDataset, padding sequences to max length in batch.
-    """
-    # Find max length in batch for input_ids (which determines length for others)
-    max_len = 0
-    for item in batch:
-        # Handle potential None items if __getitem__ decided to return None
-        if item is None or item['input_ids'] is None: continue
-        max_len = max(max_len, len(item['input_ids']))
+    Collate function for TimeAwareDataset samples.
+    Pads variable-length sequences in the batch and preserves per-sample time alignment.
 
-    # Filter out None items
-    batch = [item for item in batch if item is not None and item['input_ids'] is not None]
-    if not batch: # Return empty dict if batch becomes empty
+    Each item in batch should contain:
+        {
+            'input_ids': 1D np.array,
+            'time_values': 1D np.array,
+            'attention_mask': 1D np.array,
+            'labels': 1D np.array,
+            'loss_mask': 1D np.array,
+            'next_target_time_value': scalar (float)
+        }
+    """
+    # Filter out invalid / None samples
+    batch = [b for b in batch if b is not None and b.get("input_ids") is not None]
+    if len(batch) == 0:
         return {}
 
-    # Pad each item in the batch
+    # Determine max sequence length in the batch
+    max_len = max(len(b["input_ids"]) for b in batch)
+
+    # Prepare padded containers
     padded_batch = {
-        'input_ids': [],
-        'time_values': [],
-        'attention_mask': [],
-        'labels': [],
-        'loss_mask': [],
-        'next_target_time_value': []
+        "input_ids": [],
+        "time_values": [],
+        "attention_mask": [],
+        "labels": [],
+        "loss_mask": [],
+        "next_target_time_value": []
     }
 
     for item in batch:
-        current_len = len(item['input_ids'])
-        padding_length = max_len - current_len
+        L = len(item["input_ids"])
+        pad_len = max_len - L
 
-        if padding_length < 0:
-             # This shouldn't happen if max_len is calculated correctly
-             raise ValueError(f"Negative padding length calculated: {padding_length}")
+        # Determine pad time value: use last valid timestamp instead of 0.0
+        pad_time_val = (
+            float(item["time_values"][-1])
+            if len(item["time_values"]) > 0
+            else 0.0
+        )
 
-        # Pad arrays
-        padded_batch['input_ids'].append(np.pad(item['input_ids'], (0, padding_length), 'constant', constant_values=pad_value))
-        padded_batch['time_values'].append(np.pad(item['time_values'], (0, padding_length), 'constant', constant_values=pad_time_value))
-        padded_batch['attention_mask'].append(np.pad(item['attention_mask'], (0, padding_length), 'constant', constant_values=0)) # Pad attention mask with 0
-        padded_batch['labels'].append(np.pad(item['labels'], (0, padding_length), 'constant', constant_values=pad_value))
-        padded_batch['loss_mask'].append(np.pad(item['loss_mask'], (0, padding_length), 'constant', constant_values=0)) # Pad loss mask with 0
-        padded_batch['next_target_time_value'].append(item['next_target_time_value']) # This is scalar, just collect
+        # Pad all arrays
+        padded_batch["input_ids"].append(
+            np.pad(item["input_ids"], (0, pad_len), constant_values=pad_value)
+        )
+        padded_batch["time_values"].append(
+            np.pad(item["time_values"], (0, pad_len), constant_values=pad_time_val)
+        )
+        padded_batch["attention_mask"].append(
+            np.pad(item["attention_mask"], (0, pad_len), constant_values=0)
+        )
+        padded_batch["labels"].append(
+            np.pad(item["labels"], (0, pad_len), constant_values=pad_value)
+        )
+        padded_batch["loss_mask"].append(
+            np.pad(item["loss_mask"], (0, pad_len), constant_values=0)
+        )
 
-    # Stack arrays into tensors
-    collated_batch = {}
-    try:
-        collated_batch['input_ids'] = torch.from_numpy(np.stack(padded_batch['input_ids'])).float() # Model expects float input_ids
-        collated_batch['time_values'] = torch.from_numpy(np.stack(padded_batch['time_values'])).float()
-        collated_batch['attention_mask'] = torch.from_numpy(np.stack(padded_batch['attention_mask'])).long() # Mask is usually Long or Bool
-        collated_batch['labels'] = torch.from_numpy(np.stack(padded_batch['labels'])).float()
-        collated_batch['loss_mask'] = torch.from_numpy(np.stack(padded_batch['loss_mask'])).bool() # Use bool for loss mask
-        collated_batch['next_target_time_value'] = torch.tensor(padded_batch['next_target_time_value'], dtype=torch.float32)
-    except Exception as e:
-         print("Error during tensor conversion in collate_fn:")
-         for key, val_list in padded_batch.items():
-             if isinstance(val_list, list) and val_list:
-                  print(f"  Shape of first item in '{key}': {np.array(val_list[0]).shape}")
-             else:
-                  print(f"  Value for '{key}': {val_list}")
-         raise e
+        # The next target time should correspond to the *next* timestamp after the last valid time
+        if "next_target_time_value" in item:
+            padded_batch["next_target_time_value"].append(item["next_target_time_value"])
+        else:
+            # fallback: use extrapolated next time (delta of last step)
+            if len(item["time_values"]) >= 2:
+                delta = item["time_values"][-1] - item["time_values"][-2]
+                padded_batch["next_target_time_value"].append(item["time_values"][-1] + delta)
+            else:
+                padded_batch["next_target_time_value"].append(item["time_values"][-1] + 1.0)
 
+    # Convert to PyTorch tensors
+    collated_batch = {
+        "input_ids": torch.tensor(np.stack(padded_batch["input_ids"]), dtype=torch.float32),
+        "time_values": torch.tensor(np.stack(padded_batch["time_values"]), dtype=torch.float32),
+        "attention_mask": torch.tensor(np.stack(padded_batch["attention_mask"]), dtype=torch.long),
+        "labels": torch.tensor(np.stack(padded_batch["labels"]), dtype=torch.float32),
+        "loss_mask": torch.tensor(np.stack(padded_batch["loss_mask"]), dtype=torch.bool),
+        "next_target_time_value": torch.tensor(padded_batch["next_target_time_value"], dtype=torch.float32),
+    }
 
     return collated_batch
-

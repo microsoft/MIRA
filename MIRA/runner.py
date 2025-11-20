@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT license.
-
 '''
 Code from time_moe.models.runner
 https://github.com/Time-MoE
@@ -140,7 +137,7 @@ class MIRARunner:
         if is_time_aware_dataset and data_path.endswith('.jsonl'):
             # 1. Instantiate the base JSONL dataset
             # Pass normalization choice and quantization options from config
-            time_normalization = train_config.get('time_normalization', 'standard') # e.g., 'standard' or None
+            time_normalization = train_config.get('time_normalization', "none") # e.g., 'standard' or None
             quantize_res = train_config.get('time_quantize_resolution', None)
             auto_quantize = train_config.get('time_auto_quantize', False)
             sample_size = train_config.get('data_sample_size', 1000)

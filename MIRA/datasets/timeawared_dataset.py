@@ -1,5 +1,5 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT license.
+#!/usr/bin/env python
+# -*- coding:utf-8 _*-
 
 import json
 import os 
@@ -14,6 +14,7 @@ from mira.utils.log_util import logger
 from mira.datasets.ts_dataset import TimeSeriesDataset
 import traceback
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import random
 
 def quantize_time(times, 
                   initial_resolution=1.0, 
@@ -126,239 +127,180 @@ def load_pkl_obj(fn):
         return out_list
 
 class TimeAwareJSONLDataset(TimeSeriesDataset):
-    # Keep __init__ largely the same, but add time normalization fitting
-    def __init__(self, data_path, time_normalization='standard', quantize_resolution=None, auto_quantize=False, sample_size=1000, data_normalizer = MinMaxScaler()):
-        """
-        Args:
-            data_path (str): Path to the .jsonl file.
-            time_normalization (str or None): 'standard' for standardization, None to disable.
-            quantize_resolution (float, optional): Time quantization resolution. Defaults to None.
-            auto_quantize (bool, optional): Infer quantization resolution. Defaults to False.
-            sample_size (int, optional): Number of samples to use for inferring resolution/normalization. Defaults to 1000.
-        """
-        if not os.path.exists(data_path) or not data_path.endswith('.jsonl'):
-             raise ValueError(f"Invalid data path: {data_path}. Expecting a .jsonl file.")
+    """
+    A time-aware dataset loader for JSONL-based time series.
+    Supports optional time normalization (standard/minmax/none),
+    automatic quantization, and sequence normalization.
+    """
+
+    def __init__(
+        self,
+        data_path,
+        time_normalization="none",     
+        quantize_resolution=None,
+        auto_quantize=False,
+        sample_size=1000,
+        data_normalizer=MinMaxScaler(),
+    ):
+        if not os.path.exists(data_path) or not data_path.endswith(".jsonl"):
+            raise ValueError(f"Invalid data path: {data_path}. Expecting a .jsonl file.")
 
         logger.info(f"Loading data from {data_path}...")
-        self.data = read_file_by_extension(data_path)
+        self.data = self._read_jsonl(data_path)
         self.num_tokens = None
         self.quantize_resolution = quantize_resolution
-        self.time_normalizer = None
+        self.auto_quantize = auto_quantize
         self.data_normalizer = data_normalizer
-        # Fit data normalizer on all sequences
+        self.time_normalization = time_normalization.lower() if isinstance(time_normalization, str) else None
+        self.time_normalizer = None
+
+        # Fit normalizers
         self._fit_data_normalizer()
-        # Fit time normalizer and infer quantization
+        self._fit_time_normalizer(sample_size)
 
         logger.info(f"Finished loading and preprocessing meta info for {data_path}.")
 
+    def _read_jsonl(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            return [eval(line.strip()) for line in f.readlines()]
+
     def _fit_data_normalizer(self):
+        """Fit value normalizer (MinMaxScaler or StandardScaler) across all sequences."""
         all_vals = []
         for item in self.data:
             seq = None
-            if isinstance(item, dict) and 'sequence' in item:
-                seq = np.asarray(item['sequence'], dtype=np.float64)
+            if isinstance(item, dict) and "sequence" in item:
+                seq = np.asarray(item["sequence"], dtype=np.float64)
             elif isinstance(item, (list, np.ndarray)):
                 seq = np.asarray(item, dtype=np.float64)
             if seq is None or seq.ndim != 1 or len(seq) == 0:
                 continue
             all_vals.append(seq.reshape(-1, 1))
+
         if not all_vals:
-            logger.warning("No valid sequence data available. Disabling data normalization.")
+            logger.warning("No valid sequence data found. Disabling value normalization.")
             self.data_normalizer = None
             return
+
         all_data = np.vstack(all_vals)
         try:
             self.data_normalizer.fit(all_data)
-            logger.info(f"Fitted data normalizer {self.data_normalizer} on {all_data.shape[0]} values.")
+            logger.info(f"Fitted data normalizer on {all_data.shape[0]} values.")
         except Exception as e:
-            logger.error(f"Error fitting data normalizer: {e}. Disabling normalization.")
+            logger.error(f"Error fitting data normalizer: {e}. Normalization disabled.")
             self.data_normalizer = None
 
+    def _fit_time_normalizer(self, sample_size=1000):
+        """Fit time normalization (optional) and infer quantization."""
+        all_times, all_deltas = [], []
+        sample_size = min(sample_size, len(self.data))
+        indices = random.sample(range(len(self.data)), sample_size)
 
-    def _fit_normalizer_and_infer_quantization(self, time_normalization, auto_quantize, sample_size):
-        """Fit time normalizer and optionally infer quantization resolution."""
-        all_times = []
-        all_deltas = []
-        num_items_to_sample = min(sample_size, len(self.data))
-        logger.info(f"Sampling {num_items_to_sample} items for normalization/quantization info...")
-
-        # Sample items efficiently if dataset is large
-        indices_to_sample = np.random.choice(len(self.data), num_items_to_sample, replace=False)
-
-        for i in indices_to_sample:
+        for i in indices:
             item = self.data[i]
-            if isinstance(item, dict) and 'time' in item and 'sequence' in item:
-                # Ensure mask exists or default to all valid
-                mask = np.array(item.get('mask', np.ones_like(item['sequence'])), dtype=int)
-                time = np.array(item['time'], dtype=np.float64) # Use float64 for stats
-                sequence = np.array(item['sequence'])
+            if isinstance(item, dict) and "time" in item:
+                time = np.asarray(item["time"], dtype=np.float64)
+                mask = np.asarray(item.get("mask", np.ones_like(time)), dtype=int)
+                valid = time[mask == 1]
+                if len(valid) >= 2:
+                    all_times.append(valid)
+                    deltas = np.diff(valid)
+                    deltas = deltas[deltas > 0]
+                    if len(deltas) > 0:
+                        all_deltas.append(deltas)
 
-                # Check consistency
-                if len(time) != len(sequence) or len(mask) != len(sequence):
-                    logger.warning(f"Inconsistent lengths in item {i}: seq={len(sequence)}, time={len(time)}, mask={len(mask)}. Skipping item.")
-                    continue
+        if len(all_times) == 0:
+            logger.warning("[TimeNorm] No valid times found; skip normalization/quantization.")
+            return
 
-                valid_times = time[mask == 1]
-                if len(valid_times) > 0:
-                    all_times.append(valid_times)
-                    if len(valid_times) >= 2:
-                        deltas = np.diff(valid_times)
-                        deltas = deltas[deltas > 0] # Only positive deltas
-                        if len(deltas) > 0:
-                            all_deltas.append(deltas)
-            # Handle case where item is just a sequence (assuming regular time)
-            elif isinstance(item, (list, np.ndarray)):
-                 # Cannot infer time normalization or quantization without time info
-                 pass
+        flat_times = np.concatenate(all_times)
 
-
-        if not all_times:
-             logger.warning("No valid time data found in the sample to compute normalization statistics.")
-             return
-
-        all_times_flat = np.concatenate(all_times)
-
-
-        # Fit Time Normalizer
-        if time_normalization == 'standard':
+        # --- Fit time normalizer (optional) ---
+        if self.time_normalization in ["standard", "std"]:
             self.time_normalizer = StandardScaler()
-            # ... (try/except for standard scaler) ...
-        elif time_normalization == 'minmax': #
-            self.time_normalizer = MinMaxScaler(feature_range=(0, 1)) 
-            try:
-                self.time_normalizer.fit(all_times_flat.reshape(-1, 1))
-
-                data_min = getattr(self.time_normalizer, 'data_min_', [np.nan])[0]
-                data_max = getattr(self.time_normalizer, 'data_max_', [np.nan])[0]
-                scale = getattr(self.time_normalizer, 'scale_', [np.nan])[0]
-                min_ = getattr(self.time_normalizer, 'min_', [np.nan])[0]
-                logger.info(f"Fitted MinMaxScaler for time: data_min={data_min:.4f}, data_max={data_max:.4f}, scale={scale:.4f}, min_={min_:.4f}")
-            except ValueError as e:
-                logger.error(f"Error fitting MinMaxScaler: {e}. Disabling time normalization.")
-                self.time_normalizer = None
-        elif time_normalization is None or time_normalization.lower() == 'none':
-            logger.info("Time normalization is disabled.")
+            self.time_normalizer.fit(flat_times.reshape(-1, 1))
+            logger.info("[TimeNorm] Fitted StandardScaler for time.")
+        elif self.time_normalization == "minmax":
+            self.time_normalizer = MinMaxScaler(feature_range=(0, 1))
+            self.time_normalizer.fit(flat_times.reshape(-1, 1))
+            logger.info("[TimeNorm] Fitted MinMaxScaler for time.")
+        else:
             self.time_normalizer = None
-        else: 
-            logger.warning(f"Unsupported time_normalization_method: {time_normalization}. Normalization disabled.")
-            self.time_normalizer = None
+            logger.info("[TimeNorm] Time normalization disabled (using raw timestamps).")
 
-
-        # Infer Quantization Resolution (if enabled and not provided)
-        if auto_quantize and self.quantize_resolution is None:
-            if not all_deltas:
-                logger.warning("[Warning] Cannot infer time resolution from deltas, default to 1.0")
-                self.quantize_resolution = 1.0
+        # --- Infer quantization resolution ---
+        if self.auto_quantize:
+            if len(all_deltas) > 0:
+                median_delta = np.median(np.concatenate(all_deltas))
+                self.quantize_resolution = max(median_delta, 1e-9)
+                logger.info(f"[Quantize] Inferred resolution: {self.quantize_resolution:.6f}")
             else:
-                all_deltas_flat = np.concatenate(all_deltas)
-                if len(all_deltas_flat) == 0:
-                     logger.warning("[Warning] No positive time deltas found, default to 1.0")
-                     self.quantize_resolution = 1.0
-                else:
-                     # Use median of positive deltas as estimated resolution
-                     estimated_resolution = np.median(all_deltas_flat)
-                     self.quantize_resolution = max(estimated_resolution, 1e-9) # Avoid zero resolution
-                     logger.info(f"[Info] Inferred quantize resolution: {self.quantize_resolution:.6f}")
-        elif self.quantize_resolution is not None:
-             logger.info(f"Using provided quantize resolution: {self.quantize_resolution:.6f}")
-
-    
-    def get_sequence_length_by_idx(self, seq_idx):
-
-        try:
-            length = self.get_sequence_length(seq_idx)
-            if not isinstance(length, int) or length < 0:
-                 logger.error(f"Internal Error: get_sequence_length returned invalid value {length} for seq_idx {seq_idx}. Treating as 0.")
-                 return 0
-            return length
-        except Exception as e: 
-            logger.error(f"CRITICAL: Unexpected error in get_sequence_length_by_idx for seq_idx {seq_idx}: {type(e).__name__} - {e}.")
-            logger.error(traceback.format_exc())
-            return 0 
+                self.quantize_resolution = 1.0
+                logger.warning("[Quantize] No deltas found, defaulting to resolution=1.0.")
 
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, seq_idx):
+        """Load a single time-series sample."""
         item = self.data[seq_idx]
+
         if isinstance(item, dict):
-            # Assume keys 'sequence', 'time', 'mask' exist based on format
-            sequence = np.array(item['sequence'], dtype=np.float32)
-            time = np.array(item['time'], dtype=np.float64) # Load as float64
-            # Default mask to all ones if missing
-            mask = np.array(item.get('mask', np.ones_like(sequence)), dtype=int)
-
-            # Validate lengths
-            if not (len(sequence) == len(time) == len(mask)):
-                raise ValueError(f"Data inconsistency at index {seq_idx}: lengths differ. "
-                                 f"Sequence: {len(sequence)}, Time: {len(time)}, Mask: {len(mask)}")
-
-        elif isinstance(item, (list, np.ndarray)): # Handle case where only sequence is provided
+            sequence = np.array(item["sequence"], dtype=np.float32)
+            time = np.array(item["time"], dtype=np.float64)
+            mask = np.array(item.get("mask", np.ones_like(sequence)), dtype=int)
+        elif isinstance(item, (list, np.ndarray)):
             sequence = np.array(item, dtype=np.float32)
-            # Create dummy time and mask if missing
             time = np.arange(len(sequence), dtype=np.float64)
             mask = np.ones(len(sequence), dtype=int)
-            logger.warning(f"Item at index {seq_idx} only contains sequence data. Creating default time and mask.", once=True)
         else:
-            raise TypeError(f"Unsupported data type at index {seq_idx}: {type(item)}")
+            raise TypeError(f"Unsupported item type at index {seq_idx}: {type(item)}")
 
-        # Apply quantization if specified
+        # --- Validate lengths ---
+        if not (len(sequence) == len(time) == len(mask)):
+            raise ValueError(f"[Dataset] Inconsistent lengths at index {seq_idx}")
+
+        # --- Quantization ---
         if self.quantize_resolution is not None:
-            time = quantize_time(time, initial_resolution=self.quantize_resolution) # Use float32 result
+            time = quantize_time(time, initial_resolution=self.quantize_resolution)
 
+        # --- Optional time normalization ---
+        if self.time_normalizer is not None:
+            time = self.time_normalizer.transform(time.reshape(-1, 1)).flatten()
+
+        # --- Sequence normalization ---
         if self.data_normalizer is not None:
-            seq = np.asarray(item['sequence'], dtype=np.float32)
-            seq = self.data_normalizer.transform(seq.reshape(-1,1)).reshape(-1)
-        # Return data including mask and original times (normalization applied later)
-        # Return time as float32 for consistency in tensors
+            sequence = self.data_normalizer.transform(sequence.reshape(-1, 1)).reshape(-1)
+
+        # --- Ensure monotonic time ---
+        if not np.all(np.diff(time[mask == 1]) >= 0):
+            sort_idx = np.argsort(time)
+            sequence, time, mask = sequence[sort_idx], time[sort_idx], mask[sort_idx]
+            logger.warning(f"[TimeCheck] Non-monotonic time detected at idx {seq_idx}, sorted.")
+
         return {
-            'sequence': seq,
-            'time': time.astype(np.float32),
-            'mask': mask.astype(np.int32) # Use int32 for mask
+            "sequence": sequence.astype(np.float32),
+            "time": time.astype(np.float32),
+            "mask": mask.astype(np.int32),
         }
 
     def get_num_tokens(self):
         if self.num_tokens is None:
-            logger.info("Calculating total number of tokens...")
             self.num_tokens = sum(self.get_sequence_length(i) for i in range(len(self)))
         return self.num_tokens
 
     def get_sequence_length(self, seq_idx):
-        try:
-            item = self.data[seq_idx] 
-    
-            if isinstance(item, dict):
-                sequence_data = item.get('sequence') 
-                if sequence_data is not None and hasattr(sequence_data, '__len__'):
-                    return len(sequence_data) 
-                else: 
-                    logger.warning(f"Item at seq_idx {seq_idx} is dict but 'sequence' key is problematic. Returning length 0.", once=True)
-                    return 0
-            elif item is not None and hasattr(item, '__len__'): 
-                return len(item)
-            else: 
-                logger.warning(f"Item at seq_idx {seq_idx} is None or not sequence-like (type: {type(item)}). Returning length 0.", once=True)
-                return 0
-        except IndexError:
-            logger.error(f"IndexError getting length for seq_idx {seq_idx}. Max index is {len(self.data)-1}. Returning 0.")
-            return 0
-        except Exception as e: 
-            logger.error(f"Unexpected error getting sequence length for seq_idx {seq_idx}: {e}. Returning 0.")
-            return 0 
+        item = self.data[seq_idx]
+        if isinstance(item, dict) and "sequence" in item:
+            return len(item["sequence"])
+        elif isinstance(item, (list, np.ndarray)):
+            return len(item)
+        return 0
 
     def get_time_normalizer(self):
-        """Returns the fitted time normalizer."""
         return self.time_normalizer
-
-class MinMaxScalerFeatureRange(MinMaxScaler):
-    def __init__(self, feature_range=(0, 1), *, copy=True, clip=False):
-        super().__init__(feature_range=feature_range, copy=copy, clip=clip)
     
-    @property
-    def mean_(self): # Dummy for consistent logging if trying to access normalizer.mean_
-        return [np.nan]
-
 class TimeAwareEvalDataset(Dataset):
     def __init__(self, dataset, context_length, prediction_length, normalize=False):
         self.source_dataset = dataset
@@ -435,6 +377,5 @@ class TimeAwareEvalDataset(Dataset):
 
             inputs['sequence'] = (inputs['sequence'] - mean) / std
             labels['sequence'] = (labels['sequence'] - mean) / std
-
 
         return inputs, labels

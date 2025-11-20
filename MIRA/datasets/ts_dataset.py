@@ -1,6 +1,5 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT license.
-
+#!/usr/bin/env python
+# -*- coding:utf-8 _*-
 from abc import abstractmethod
 
 '''

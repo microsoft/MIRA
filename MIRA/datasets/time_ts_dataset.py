@@ -1,5 +1,6 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT license.
+#!/usr/bin/env python
+# -*- coding:utf-8 _*-
+
 
 from abc import abstractmethod
 
@@ -28,5 +29,4 @@ class TimeSeriesDataset:
     def __iter__(self):
         n_seqs = len(self)
         for i in range(n_seqs):
-
             yield self[i]

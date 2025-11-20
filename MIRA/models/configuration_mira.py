@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT license.
-
 '''
 Part of code from time_moe.models.configuration_time_moe
 https://github.com/Time-MoE
@@ -34,11 +31,12 @@ class MIRAConfig(PretrainedConfig):
             rms_norm_eps: float = 1e-6,
             use_cache: bool = True,
             use_dense: bool = False,
+            
 
             # Time/Positional Encoding
             time_aware_rotary: bool = True,
             rope_theta: int = 10000,
-
+            time_scale: float = 1.0,
 
 
             # Terminal ODE Module
@@ -49,6 +47,7 @@ class MIRAConfig(PretrainedConfig):
             ode_solver_atol: float = 1e-6,
             ode_solver_rtol: float = 1e-6,
             ode_func_use_time: bool = True, # Whether f_ODE uses relative time (s-t_N) as input
+            ode_activation_threshold: float = 1.0,
 
             # MoE Config
             apply_aux_loss: bool = True, # Automatically disabled if use_dense=True
@@ -84,9 +83,9 @@ class MIRAConfig(PretrainedConfig):
 
 
         # Time/Positional Encoding 
-        self.time_aware_rotary = time_aware_rotary
-        # self.rope_theta = float(rope_theta) # Ensure float, matches 'base' in CT-RoPE
         self.rope_theta = rope_theta
+        self.time_aware_rotary = time_aware_rotary
+        self.time_scale = time_scale 
 
         # Terminal ODE 
         self.use_terminal_ode = use_terminal_ode
@@ -96,6 +95,7 @@ class MIRAConfig(PretrainedConfig):
         self.ode_solver_atol = ode_solver_atol
         self.ode_solver_rtol = ode_solver_rtol
         self.ode_func_use_time = ode_func_use_time
+        self.ode_activation_threshold = ode_activation_threshold
 
         # MoE 
         # Ensure apply_aux_loss matches MoE usage
