@@ -298,6 +298,10 @@ class TimeAwareJSONLDataset(TimeSeriesDataset):
             return len(item)
         return 0
 
+    def get_sequence_length_by_idx(self, seq_idx):
+        """Required by TimeSeriesDataset abstract base class."""
+        return self.get_sequence_length(seq_idx)
+
     def get_time_normalizer(self):
         return self.time_normalizer
     
