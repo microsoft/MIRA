@@ -187,7 +187,16 @@ class MIRAWindowDataset:
 
     def __getitem__(self, seq_idx):
         seq_i, offset_i = self.sub_seq_indexes[seq_idx]
-        seq = self.dataset[seq_i][offset_i: offset_i + self.window_size_plus_one]
+        item = self.dataset[seq_i]
+        # Handle dictionary return type from MIRADataset
+        if isinstance(item, dict):
+            seq = item.get('sequence', item.get('values', None))
+            if seq is None:
+                raise ValueError(f"Dictionary item missing 'sequence' or 'values' key: {item.keys()}")
+        else:
+            seq = item
+        # Slice the sequence array
+        seq = seq[offset_i: offset_i + self.window_size_plus_one]
         seq = np.array(seq, dtype=np.float32)
 
         loss_mask = np.ones(len(seq) - 1, dtype=np.int32)
@@ -268,7 +277,16 @@ class UniversalMIRAWindowDataset:
         window_info = self.window_info_list[window_idx]
         seq = []
         for seq_idx, start_idx_in_seq, offset in window_info:
-            part_seq = self.dataset[seq_idx][start_idx_in_seq: start_idx_in_seq + offset]
+            item = self.dataset[seq_idx]
+            # Handle dictionary return type from MIRADataset
+            if isinstance(item, dict):
+                part_seq = item.get('sequence', item.get('values', None))
+                if part_seq is None:
+                    raise ValueError(f"Dictionary item missing 'sequence' or 'values' key: {item.keys()}")
+            else:
+                part_seq = item
+            # Slice the sequence array
+            part_seq = part_seq[start_idx_in_seq: start_idx_in_seq + offset]
             seq.append(part_seq)
         if len(seq) == 1:
             seq = seq[0]
