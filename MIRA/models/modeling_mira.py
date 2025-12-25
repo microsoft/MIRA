@@ -494,6 +494,9 @@ class MIRAAttention(nn.Module):
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        
+        # Calculate past length for rotary embedding if needed
+        past_len = 0
         if past_key_value is not None:
             if self.layer_idx is None:
                 raise ValueError(
@@ -502,9 +505,6 @@ class MIRAAttention(nn.Module):
                     "with a layer index."
                 )
             past_len = past_key_value.get_seq_length()
-            kv_seq_len = past_len + key_states.shape[-2]
-        else:
-            kv_seq_len = key_states.shape[-2]
         
         if isinstance(self.rotary_emb, ContinuousTimeRotaryEmbedding):
             if time_values is None:
@@ -519,7 +519,7 @@ class MIRAAttention(nn.Module):
             if position_ids is None:
                 raise ValueError("`position_ids` must be provided for standard RoPE.")
             # Rotary embedding needs the full sequence length for cos/sin cache lookup
-            cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len + q_len) # Use total target length
+            cos, sin = self.rotary_emb(value_states, seq_len=past_len + q_len) # Use total target length
             # Position IDs should correspond to the indices of the tokens being processed *now*
             # If using cache, position_ids should be like [past_len, past_len + 1, ...]
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
@@ -532,6 +532,9 @@ class MIRAAttention(nn.Module):
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        
+        # Calculate kv_seq_len AFTER cache update, as key_states now includes cached values
+        kv_seq_len = key_states.shape[-2]
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -621,7 +624,8 @@ class MIRAFlashAttention2(MIRAAttention):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        kv_seq_len = key_states.shape[-2]
+        # Calculate past length for rotary embedding
+        past_len = 0
         if past_key_value is not None:
             if self.layer_idx is None:
                 raise ValueError(
@@ -629,8 +633,11 @@ class MIRAFlashAttention2(MIRAAttention):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_seq_length()
-        rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
+            past_len = past_key_value.get_seq_length()
+        
+        # Calculate rotary_seq_len for embedding (before cache update)
+        kv_seq_len_for_rope = key_states.shape[-2] + past_len
+        rotary_seq_len = max(kv_seq_len_for_rope, position_ids[:, -1].max().item()) + 1
         cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
@@ -638,6 +645,9 @@ class MIRAFlashAttention2(MIRAAttention):
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        
+        # Calculate actual kv_seq_len AFTER cache update
+        kv_seq_len = key_states.shape[-2]
 
         # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
         # to be able to avoid many of these transpose/reshape/view.
