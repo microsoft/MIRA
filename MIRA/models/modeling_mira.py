@@ -965,7 +965,7 @@ class MIRAModel(MIRAPreTrainedModel):
 
         past_key_values_length = 0
 
-        if use_cache:
+        if use_cache and past_key_values is not None:
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
