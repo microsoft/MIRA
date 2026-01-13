@@ -4,6 +4,6 @@ pandas
 torch
 scikit-learn
 
-transformers==4.40.1
+transformers==4.53.0
 datasets==2.18.0
 accelerate==0.28.0
