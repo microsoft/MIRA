@@ -157,6 +157,13 @@ class TimeAwareJSONLDataset(TimeSeriesDataset):
         # Fit normalizers
         self._fit_data_normalizer()
         self._fit_time_normalizer(sample_size)
+        
+        # Pre-quantize all sequences if quantization is enabled
+        if self.quantize_resolution is not None:
+            self._pre_quantize_times()
+            self._times_pre_quantized = True
+        else:
+            self._times_pre_quantized = False
 
         logger.info(f"Finished loading and preprocessing meta info for {data_path}.")
 
@@ -238,6 +245,18 @@ class TimeAwareJSONLDataset(TimeSeriesDataset):
                 self.quantize_resolution = 1.0
                 logger.warning("[Quantize] No deltas found, defaulting to resolution=1.0.")
 
+    def _pre_quantize_times(self):
+        """Pre-quantize all time sequences once during initialization."""
+        logger.info(f"[Quantize] Pre-quantizing all sequences with resolution {self.quantize_resolution:.8f}...")
+        quantized_count = 0
+        for idx, item in enumerate(self.data):
+            if isinstance(item, dict) and "time" in item:
+                time = np.array(item["time"], dtype=np.float64)
+                quantized_time = quantize_time(time, initial_resolution=self.quantize_resolution)
+                # Update the item in-place with quantized time
+                self.data[idx]["time"] = quantized_time.tolist()
+                quantized_count += 1
+        logger.info(f"[Quantize] Pre-quantized {quantized_count} sequences.")
 
     def __len__(self):
         return len(self.data)
@@ -262,8 +281,9 @@ class TimeAwareJSONLDataset(TimeSeriesDataset):
             raise ValueError(f"[Dataset] Inconsistent lengths at index {seq_idx}")
 
         # --- Quantization ---
-        if self.quantize_resolution is not None:
-            time = quantize_time(time, initial_resolution=self.quantize_resolution)
+        # Note: Quantization is now done during initialization (_pre_quantize_times)
+        # Skip quantization here since it's already been done
+        # (time values in self.data are already quantized)
 
         # --- Optional time normalization ---
         if self.time_normalizer is not None:
@@ -297,6 +317,10 @@ class TimeAwareJSONLDataset(TimeSeriesDataset):
         elif isinstance(item, (list, np.ndarray)):
             return len(item)
         return 0
+
+    def get_sequence_length_by_idx(self, seq_idx):
+        """Required by TimeSeriesDataset abstract base class."""
+        return self.get_sequence_length(seq_idx)
 
     def get_time_normalizer(self):
         return self.time_normalizer

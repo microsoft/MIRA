@@ -192,7 +192,7 @@ class MIRARunner:
             num_train_epochs=num_train_epochs,
             # use_cpu=True,
             max_steps=train_steps,
-            evaluation_strategy=train_config.get("evaluation_strategy", 'no'),
+            eval_strategy=train_config.get("evaluation_strategy", 'no'),
             eval_steps=_safe_float(train_config.get("eval_steps", None)),
             save_strategy=train_config.get("save_strategy", "no"),
             save_steps=_safe_float(train_config.get("save_steps", None)),

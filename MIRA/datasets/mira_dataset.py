@@ -84,7 +84,15 @@ class MIRADataset(TimeSeriesDataset):
         seq = self.datasets[dataset_idx][dataset_offset]
 
         if self.normalization_method is not None:
-            seq = self.normalization_method(seq)
+            # If seq is a dict, normalize only the sequence array
+            if isinstance(seq, dict):
+                seq_key = 'sequence' if 'sequence' in seq else 'values'
+                if seq_key in seq:
+                    seq[seq_key] = self.normalization_method(seq[seq_key])
+                else:
+                    raise ValueError(f"Dictionary item missing 'sequence' or 'values' key: {seq.keys()}")
+            else:
+                seq = self.normalization_method(seq)
         
         if isinstance(seq, dict):  
             return seq
