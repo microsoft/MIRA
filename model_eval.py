@@ -12,33 +12,28 @@ from MIRA.mira.models.utils_time_normalization import normalize_time_for_ctrope
 
 def load_jsonl_timeseries(jsonl_path):
     seqs, times = [], []
-
     with open(jsonl_path, "r") as f:
         for line in f:
             obj = json.loads(line)
             seqs.append(torch.tensor(obj["sequence"], dtype=torch.float32))
             times.append(torch.tensor(obj["time"], dtype=torch.float32))
+    return seqs, times  # keep as lists (no stack!)
 
-    return torch.stack(seqs, dim=0), torch.stack(times, dim=0)
 
 def snap_and_dedup_times(t_scaled, snap=0.1):
-
     snapped = torch.round(t_scaled / snap) * snap
-
-    # ensure monotonic by shifting small epsilon
     eps = 1e-4
     for i in range(1, snapped.numel()):
-        if snapped[0, i] <= snapped[0, i-1]:
-            snapped[0, i] = snapped[0, i-1] + eps
-
+        if snapped[0, i] <= snapped[0, i - 1]:
+            snapped[0, i] = snapped[0, i - 1] + eps
     return snapped
 
-def mira_predict_autoreg_norm(model, values, raw_times, C, P, mean, std):
 
+def mira_predict_autoreg_norm(model, values, raw_times, C, P, mean, std):
     device = next(model.parameters()).device
+
     values = values.to(device)
     raw_times = raw_times.to(device)
-
     mean = mean.to(device)
     std = std.to(device)
 
@@ -55,7 +50,7 @@ def mira_predict_autoreg_norm(model, values, raw_times, C, P, mean, std):
 
     hist_vals = values_norm[:, :C]
     hist_times = full_scaled_times[:, :C]
-    future_times = full_scaled_times[:, C:C+P]
+    future_times = full_scaled_times[:, C:C + P]
 
     cur_vals = hist_vals.clone()
     cur_times = hist_times.clone()
@@ -63,8 +58,8 @@ def mira_predict_autoreg_norm(model, values, raw_times, C, P, mean, std):
     preds_norm = []
 
     for i in range(P):
-        inp_vals = cur_vals.unsqueeze(-1)  # [1, L, 1]
-        inp_times = cur_times             # [1, L]
+        inp_vals = cur_vals.unsqueeze(-1)
+        inp_times = cur_times
 
         with torch.no_grad():
             out = model(
@@ -74,75 +69,77 @@ def mira_predict_autoreg_norm(model, values, raw_times, C, P, mean, std):
                 return_dict=True,
             )
 
-        next_norm = out.logits[:, -1, :]  # [1, 1]
+        next_norm = out.logits[:, -1, :]
         preds_norm.append(next_norm.squeeze(0))
 
-        next_t = future_times[:, i:i+1]
-
+        next_t = future_times[:, i:i + 1]
         cur_vals = torch.cat([cur_vals, next_norm], dim=1)
         cur_times = torch.cat([cur_times, next_t], dim=1)
 
     preds_norm = torch.stack(preds_norm, dim=1)
-    preds = preds_norm * std + mean  # de-normalize
-
+    preds = preds_norm * std + mean
     return preds.squeeze(0)
 
-def evaluate_nonoverlap(model, seq, times, C, P, mean, std):
+def evaluate_one_window(model, seq, times, C, P, mean, std):
+    """Evaluate only one window (batch size = 1)."""
+    device = next(model.parameters()).device
 
-    rmse_list, mae_list = [], []
+    T = len(seq)
+    if T < C + P:
+        return None, None
 
-    T = seq.numel()
-    w = C + P
+    # Move sequence and time to device
+    hist = seq[:C + P].to(device)
+    t_hist = times[:C + P].to(device)
 
-    for start in range(0, T, w):
-        end = start + w
-        if end > T:
-            break
+    mean = mean.to(device)
+    std = std.to(device)
 
-        s = seq[start:end]
-        t = times[start:end]
+    pred = mira_predict_autoreg_norm(
+        model,
+        hist.unsqueeze(0),
+        t_hist.unsqueeze(0),
+        C,
+        P,
+        mean,
+        std,
+    )
 
-        pred = mira_predict_autoreg_norm(model, s.unsqueeze(0), t.unsqueeze(0), C, P, mean, std)
-        gt = s[C:C+P]
+    gt = hist[C:C + P].to(device)
 
-        rmse_list.append(torch.sqrt(F.mse_loss(pred, gt)).item())
-        mae_list.append(F.l1_loss(pred, gt).item())
+    rmse = torch.sqrt(F.mse_loss(pred, gt)).item()
+    mae = F.l1_loss(pred, gt).item()
+    return rmse, mae
 
-    return rmse_list, mae_list
 
-def rolling_eval_dataset(model, values, times, settings):
+def rolling_eval_dataset(model, seq_list, time_list, settings):
 
     results = {}
 
-    for (C, P) in settings:
-        print(f"\n===== Evaluating: history={C}, pred={P} =====")
-        all_rmse, all_mae = [], []
+    for C, P in settings:
+        rmses, maes = [], []
 
-        for i in range(values.size(0)):
-            seq = values[i]
-            tms = times[i]
+        for seq, tms in zip(seq_list, time_list):
 
-            if seq.size(0) < C + P:
-                continue
+            device = next(model.parameters()).device
+            mean = seq.mean().to(device)
+            std = (seq.std() + 1e-6).to(device)
 
-            mean = seq.mean()
-            std = seq.std() + 1e-6
+            rmse, mae = evaluate_one_window(model, seq, tms, C, P, mean, std)
+            if rmse is not None:
+                rmses.append(rmse)
+                maes.append(mae)
 
-            rmses, maes = evaluate_nonoverlap(model, seq, tms, C, P, mean, std)
-            all_rmse.extend(rmses)
-            all_mae.extend(maes)
+        results[(C, P)] = {
+            "rmse": sum(rmses) / len(rmses) if rmses else float("nan"),
+            "mae": sum(maes) / len(maes) if maes else float("nan"),
+            "n": len(rmses),
+        }
 
-        results[(C, P)] = dict(
-            rmse=sum(all_rmse) / len(all_rmse),
-            mae=sum(all_mae) / len(all_mae),
-            n=len(all_rmse),
-        )
-
-        print(f"RMSE={results[(C,P)]['rmse']:.4f} | "
-              f"MAE={results[(C,P)]['mae']:.4f} | "
-              f"N={results[(C,P)]['n']}")
+        print(f"{C}->{P} | N={len(rmses)} | RMSE={results[(C,P)]['rmse']:.4f} | MAE={results[(C,P)]['mae']:.4f}")
 
     return results
+
 
 def main():
 
@@ -156,8 +153,8 @@ def main():
     model.eval()
 
     print("[INFO] Loading dataset:", args.data)
-    values, times = load_jsonl_timeseries(args.data)
-    print("Values:", values.shape, "Times:", times.shape)
+    seq_list, time_list = load_jsonl_timeseries(args.data)
+    print("Loaded:", len(seq_list), "series")
 
     settings = [
         (48, 24),
@@ -166,7 +163,7 @@ def main():
         (128, 64),
     ]
 
-    results = rolling_eval_dataset(model, values, times, settings)
+    results = rolling_eval_dataset(model, seq_list, time_list, settings)
 
     print("\n===== FINAL SUMMARY =====")
     for (C, P), info in results.items():
