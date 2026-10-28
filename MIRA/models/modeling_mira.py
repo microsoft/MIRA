@@ -871,7 +871,10 @@ class MIRAPreTrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         std = self.config.initializer_range
         if isinstance(module, torch.nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
+            if nn.utils.parametrize.is_parametrized(module, "weight"):
+                module.parametrizations.weight.original.data.normal_(mean=0.0, std=std)
+            else:
+                module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, torch.nn.Embedding):
@@ -1077,19 +1080,23 @@ class ODEFunc(nn.Module):
 
         # Build hidden layers
         for hidden_dim in config.ode_func_hidden_dims:
-            layers.append(nn.Linear(current_dim, hidden_dim))
+            layers.append(self._linear(current_dim, hidden_dim))
             layers.append(self.activation)
             current_dim = hidden_dim
         # Final layer back to hidden_size (output is dh/ds)
-        layers.append(nn.Linear(current_dim, self.hidden_size))
+        layers.append(self._linear(current_dim, self.hidden_size))
         self.net = nn.Sequential(*layers)
 
+    def _linear(self, in_dim, out_dim):
+        layer = nn.Linear(in_dim, out_dim)
+        if getattr(self.config, "ode_func_spectral_norm", False):
+            layer = nn.utils.parametrizations.spectral_norm(layer)
+        return layer
+
     def forward(self, s, h):
-        # s: current integration time (relative time, scalar tensor starting from 0)
-        # h: current hidden state [batch_size, hidden_size]
+        # s: relative time, scalar or [B]; h: [B, D]
         if self.use_time:
-            # Concatenate relative time s
-            s_vec = torch.full((h.shape[0], 1), s.item(), device=h.device, dtype=h.dtype)
+            s_vec = torch.as_tensor(s, device=h.device, dtype=h.dtype).reshape(-1, 1).expand(h.shape[0], 1)
             input_ode = torch.cat([s_vec, h], dim=-1)
             # Ensure input layer matches concatenated dim
             if self.net[0].in_features != self.hidden_size + 1:
@@ -1119,61 +1126,40 @@ class TerminalODEBlock(nn.Module):
         if h_N.dim() != 2: raise ValueError(f"Expected h_N [B, D], got {h_N.shape}")
         if t_N.dim() > 1 or t_Nplus1.dim() > 1: warnings.warn("ODE time inputs have >1 dim, ensure compatibility.")
 
-        # ODE solver expects time points as a 1D tensor.
-        delta_t = t_Nplus1 - t_N
+        # per-sample dt, dt <= 0 keeps h_N
+        delta_t = (t_Nplus1 - t_N).reshape(-1).to(device=h_N.device, dtype=h_N.dtype)
+        if delta_t.shape[0] == 1 and h_N.shape[0] > 1:
+            delta_t = delta_t.expand(h_N.shape[0])
+        if delta_t.shape[0] != h_N.shape[0]:
+            raise ValueError(f"delta_t has {delta_t.shape[0]} entries but batch size is {h_N.shape[0]}")
+        delta_t = delta_t.clamp(min=0.0)
 
-        # Handle cases where delta_t might be zero or negative per batch item
-        # We consider delat_t smaller than 1 as regular time interval as pos_ids: 0,1,2...
-        if torch.any(delta_t <= 1):
-             warnings.warn("ODE integration interval delta_t <= 0 detected for some batch items. Returning initial state h_N for those items.")
-             # Identify indices where delta_t > 0
-             valid_indices = delta_t > 0
-             if not torch.any(valid_indices): return h_N # All invalid, return original
-             
-             # Prepare inputs only for valid indices
-             h_N_valid = h_N[valid_indices]
-             delta_t_valid = delta_t[valid_indices]
-             max_delta_t = torch.max(delta_t_valid)
-             t_eval = torch.tensor([0.0, max_delta_t.item()], device=h_N.device)
+        # integrate on tau in [0, 1] with s = tau * dt
+        dynamics = _RescaledODEDynamics(self.ode_func, delta_t)
+        t_eval = torch.tensor([0.0, 1.0], device=h_N.device, dtype=h_N.dtype)
 
-             # Solve ODE only for valid batch items
-             solution_valid = odeint(
-                 self.ode_func, h_N_valid, t_eval,
-                 method=self.ode_method, atol=self.atol, rtol=self.rtol,
-                 adjoint_params=tuple(self.parameters()) # Pass ODEFunc params for adjoint
-             )
-             h_extrapolated_valid = solution_valid[-1] # State at max_delta_t [N_valid, D]
-
-             if torch.any(delta_t <= 1):
-                 warnings.warn("delta_t negative detected, returning input state for those items.")
-                 # For now, just solve for the whole batch using first item's delta_t for t_eval shape
-                 # This requires user to ensure valid delta_t or handle results carefully.
-                 t_eval = torch.tensor([0.0, delta_t[0].item()], device=h_N.device)
-
-        else:
-            # All delta_t are positive, use the first one to define t_eval interval points
-            t_eval = torch.tensor([0.0, delta_t[0].item()], device=h_N.device)
-
-
-        # --- Solve ODE (relative time integral) ---
         solution = odeint(
-            self.ode_func,
-            h_N, # Initial condition y0 [B, D]
-            t_eval, # Evaluate at relative time 0 and delta_t [2]
+            dynamics,
+            h_N,
+            t_eval,
             method=self.ode_method,
             atol=self.atol,
             rtol=self.rtol,
-            adjoint_params=tuple(p for p in self.ode_func.parameters() if p.requires_grad) # Adjoint needs params
+            adjoint_params=tuple(p for p in self.ode_func.parameters() if p.requires_grad)
         )
+        return solution[-1]
 
-        # Extract the solution at the end of the interval (relative time delta_t)
-        h_extrapolated = solution[-1] # Shape [B, D]
 
-        # If some intervals were invalid, restore original h_N for those
-        if torch.any(delta_t <= 0):
-             h_extrapolated[delta_t <= 0] = h_N[delta_t <= 0]
+class _RescaledODEDynamics(nn.Module):
+    # dh/dtau = dt * f(tau * dt, h)
 
-        return h_extrapolated
+    def __init__(self, ode_func: nn.Module, delta_t: torch.Tensor):
+        super().__init__()
+        self.ode_func = ode_func
+        self.delta_t = delta_t
+
+    def forward(self, tau, h):
+        return self.delta_t.unsqueeze(-1) * self.ode_func(tau * self.delta_t, h)
 
 
 class MIRAOutputLayer(nn.Module):
