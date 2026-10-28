@@ -47,6 +47,7 @@ class MIRAConfig(PretrainedConfig):
             ode_solver_atol: float = 1e-6,
             ode_solver_rtol: float = 1e-6,
             ode_func_use_time: bool = True, # Whether f_ODE uses relative time (s-t_N) as input
+            ode_func_spectral_norm: bool = False, # Spectral norm on f_ODE linear layers
             ode_activation_threshold: float = 1.0,
 
             # MoE Config
@@ -95,6 +96,7 @@ class MIRAConfig(PretrainedConfig):
         self.ode_solver_atol = ode_solver_atol
         self.ode_solver_rtol = ode_solver_rtol
         self.ode_func_use_time = ode_func_use_time
+        self.ode_func_spectral_norm = ode_func_spectral_norm
         self.ode_activation_threshold = ode_activation_threshold
 
         # MoE 
