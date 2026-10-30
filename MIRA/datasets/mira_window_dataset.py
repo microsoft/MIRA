@@ -187,7 +187,19 @@ class MIRAWindowDataset:
 
     def __getitem__(self, seq_idx):
         seq_i, offset_i = self.sub_seq_indexes[seq_idx]
-        seq = self.dataset[seq_i][offset_i: offset_i + self.window_size_plus_one]
+        item = self.dataset[seq_i]
+        # Handle dictionary return type from MIRADataset
+        if isinstance(item, dict):
+            seq = item.get('sequence', item.get('values', None))
+            if seq is None:
+                raise ValueError(f"Dictionary item missing 'sequence' or 'values' key: {item.keys()}")
+            # Extract time_values if available
+            time_vals = item.get('time', None)
+        else:
+            seq = item
+            time_vals = None
+        # Slice the sequence array
+        seq = seq[offset_i: offset_i + self.window_size_plus_one]
         seq = np.array(seq, dtype=np.float32)
 
         loss_mask = np.ones(len(seq) - 1, dtype=np.int32)
@@ -196,11 +208,26 @@ class MIRAWindowDataset:
             seq = np.pad(seq, (0, n_pad), 'constant', constant_values=0)
             loss_mask = np.pad(loss_mask, (0, n_pad), 'constant', constant_values=0)
 
-        return {
+        result = {
             'input_ids': seq[:-1],
             'labels': seq[1:],
             'loss_masks': loss_mask
         }
+        
+        # Add time_values if available (needed for CT-RoPE)
+        if time_vals is not None:
+            time_vals = np.array(time_vals, dtype=np.float32)
+            time_vals_sliced = time_vals[offset_i: offset_i + self.window_size_plus_one]
+            if n_pad > 0:
+                # Pad time_values with the last valid time value
+                pad_time_val = float(time_vals_sliced[-1]) if len(time_vals_sliced) > 0 else 0.0
+                time_vals_sliced = np.pad(time_vals_sliced, (0, n_pad), 'constant', constant_values=pad_time_val)
+            result['time_values'] = time_vals_sliced[:-1]  # Match input_ids length
+        else:
+            # Generate default time_values if not available (for compatibility)
+            result['time_values'] = np.arange(len(seq) - 1, dtype=np.float32)
+
+        return result
 
 # Code copied from time_moe.datasets.time_moe_window_dataset
 class UniversalMIRAWindowDataset:
@@ -268,7 +295,16 @@ class UniversalMIRAWindowDataset:
         window_info = self.window_info_list[window_idx]
         seq = []
         for seq_idx, start_idx_in_seq, offset in window_info:
-            part_seq = self.dataset[seq_idx][start_idx_in_seq: start_idx_in_seq + offset]
+            item = self.dataset[seq_idx]
+            # Handle dictionary return type from MIRADataset
+            if isinstance(item, dict):
+                part_seq = item.get('sequence', item.get('values', None))
+                if part_seq is None:
+                    raise ValueError(f"Dictionary item missing 'sequence' or 'values' key: {item.keys()}")
+            else:
+                part_seq = item
+            # Slice the sequence array
+            part_seq = part_seq[start_idx_in_seq: start_idx_in_seq + offset]
             seq.append(part_seq)
         if len(seq) == 1:
             seq = seq[0]
